@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="1281053a-bc60-441a-89a6-81f080adff89" name="10.108.17.105" url="http://10.108.17.105">
+        <fileTransfer host="10.108.17.105" port="22" rootFolder="/home/rygeng/yxzhang/mac" accessType="SFTP">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" shareSSLContext="true" />
+          </advancedOptions>
+          <option name="port" value="22" />
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
