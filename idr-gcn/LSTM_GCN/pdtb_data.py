@@ -1,7 +1,3 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2018/9/1 9:46
-# @Author  : WCheng
-
 import spacy
 import nltk
 import os
@@ -15,7 +11,7 @@ import random
 from sklearn.model_selection import train_test_split
 import os
 nlp = spacy.load('en_core_web_sm')
-path = r''
+path = ''
 
 
 
@@ -105,6 +101,7 @@ class pddata():
             self.embedding = pickle.load(open(os.path.join(path, 'embedding.pickle'), 'rb'))
             self.voc2id = pickle.load(open(os.path.join(path, 'voc2id.pickle'), 'rb'))
 
+
         # 生成所需的embedding和词表
         # else:
         #     voc_fre = pickle.load(open(os.path.join(path, 'Implicit_token_fre.pickle'), 'rb'))
@@ -178,7 +175,7 @@ class pddata():
 
     # 构建指定关系的二分类模型的正负样本
     def gen_rel_data(self, relation):
-        self.data = pickle.load(open(os.path.join(path, 'train_dev_test.ids'), 'rb'))
+        self.data = pickle.load(open('../train_dev_test.ids', 'rb'))
         train_pos = [[arg1, arg2, 1] for rel, arg1, arg2 in self.data['train'] if rel == relation]
         train_neg = [[arg1, arg2, 0] for rel, arg1, arg2 in self.data['train'] if rel != relation]
 
@@ -201,6 +198,7 @@ class pddata():
     # 构建4分类模型样本
     def gen_whole_data(self):
         self.data = pickle.load(open(os.path.join(path, 'train_dev_test.ids'), 'rb'))
+        # self.data = pickle.load('train_dev_test.ids', 'rb')
         rel2id = {'Expansion':0, 'Contingency':1, 'Comparison':2, 'Temporal':3}
 
         train = [[sample[1], sample[2], rel2id[sample[0]]] for sample in self.data['train']]
@@ -227,13 +225,11 @@ class pddata():
         else:
             return None
 
-        arg_len = np.array([[min(len(arg1),150), min(len(arg2),150)] for arg1,arg2,label in selected_samples])
+        arg_len = np.array([[min(len(arg1),self.arg1_max_len), min(len(arg2),self.arg2_max_len)] for arg1,arg2,label in selected_samples])
         arg1_len = arg_len[:, 0]
         arg2_len = arg_len[:, 1]
-        self.arg1_max_len = min(max(arg1_len),150)
-        self.arg2_max_len = min(max(arg2_len),150)
-
-        # print(self.seq_length)
+        # self.arg1_max_len = min(max(arg1_len),150)
+        # self.arg2_max_len = min(max(arg2_len),150)
 
         tmp = [[self._padding(arg1, self.arg1_max_len), self._padding(arg2, self.arg2_max_len), label]
                         for arg1, arg2, label in selected_samples]
@@ -261,11 +257,12 @@ class pddata():
         else:
             return None
 
-        arg_len = np.array([[min(len(arg1),150), min(len(arg2),150)] for arg1, arg2, label in selected_samples])
+        arg_len = np.array([[min(len(arg1),self.arg1_max_len), min(len(arg2),self.arg2_max_len)] for arg1, arg2, label in selected_samples])
         arg1_len = arg_len[:, 0]
         arg2_len = arg_len[:, 1]
-        self.arg1_max_len = min(max(arg1_len),150)
-        self.arg2_max_len = min(max(arg2_len),150)
+        # self.arg1_max_len = min(max(arg1_len),150)
+        # self.arg2_max_len = min(max(arg2_len),150)
+
         tmp = [[self._padding(arg1, self.arg1_max_len), self._padding(arg2, self.arg2_max_len), label]
                         for arg1, arg2, label in selected_samples]
         arg1 = [arg1 for arg1, _, _ in tmp]
