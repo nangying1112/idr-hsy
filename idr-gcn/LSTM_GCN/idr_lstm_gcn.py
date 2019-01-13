@@ -6,22 +6,22 @@ import time
 import os
 from sklearn import metrics
 import numpy as np
-import scipy.sparse as sp
-from pdtb_data import pddata
 import itertools
+from LSTM_GCN.pdtb_data import pddata
+from multi_head import transformer
 
-epsilon_bn =1e-2
+epsilon_bn =1e-6
 flags = tf.app.flags
 FLAGS = flags.FLAGS
 flags.DEFINE_string('classes', 2, 'num-class classification:[2,4]')
 # ['Expansion','Contingency','Comparison','Temporal',None]
-flags.DEFINE_string('pos_class', 'Expansion', 'positive class in 2-class classification:')
+flags.DEFINE_string('pos_class', 'Comparison', 'positive class in 2-class classification:')
 flags.DEFINE_integer('embedding_size', 300, 'embedding size.')
 flags.DEFINE_integer('rnn_size', 256, 'hidden_units_size of lstm')
 flags.DEFINE_integer('gcn_size', 128, 'Number of units in hidden layer 1.')
 flags.DEFINE_integer('batch_size', 64, 'Model string.')
-flags.DEFINE_integer('seq_length', 50, 'seq_length.')
-flags.DEFINE_float('learning_rate', 0.001, 'Initial learning rate.')
+flags.DEFINE_integer('seq_length', 200, 'seq_length.')
+flags.DEFINE_float('learning_rate', 0.01, 'Initial learning rate.')
 flags.DEFINE_integer('epochs', 15, 'Number of epochs to train.')
 flags.DEFINE_float('dropout', 0.5, ' keep probability')
 flags.DEFINE_float('weight_decay', 0.9,
@@ -38,14 +38,15 @@ class idr_base_model():
         self.trainable = tf.placeholder(tf.bool, None)
         self.lr_decay_factor = tf.placeholder(tf.float32, None)
         self.lr_decay_op = tf.assign(self.lr, self.lr * self.lr_decay_factor)
-        self.arg1_max_len = tf.placeholder(tf.int32, shape=(),name="arg1_max_len")
-        self.arg2_max_len = tf.placeholder(tf.int32, shape=(),name="arg2_max_len")
+        self.arg1_max_len = FLAGS.seq_length
+        self.arg2_max_len = FLAGS.seq_length
+        # self.arg1_max_len = tf.placeholder(tf.int32, shape=(),name="arg1_max_len")
+        # self.arg2_max_len = tf.placeholder(tf.int32, shape=(),name="arg2_max_len")
 
-        # print(self.arg1_max_len)
         # batch_size, steps
-        self.arg1_ids = tf.placeholder(tf.int32, [batch_size, None], "arg1_ids")
+        self.arg1_ids = tf.placeholder(tf.int32, [batch_size, FLAGS.seq_length], "arg1_ids")
         self.arg1_len = tf.placeholder(tf.int32, [batch_size], "arg1_len")
-        self.arg2_ids = tf.placeholder(tf.int32, [batch_size, None], "arg2_ids")
+        self.arg2_ids = tf.placeholder(tf.int32, [batch_size, FLAGS.seq_length], "arg2_ids")
         self.arg2_len = tf.placeholder(tf.int32, [batch_size], "arg2_len")
         self.labels = tf.placeholder(tf.int32, [batch_size], 'labels')
         if self.trainable == True:
@@ -95,7 +96,6 @@ class idr_base_model():
                                                                               # initial_state_fw=init_fw_state,
                                                                               # initial_state_bw=init_bw_state,
                                                                               )
-
             arg_scope.reuse_variables()
 
             # ??? 用0 or arg1_final_state 初始化cell
@@ -108,45 +108,59 @@ class idr_base_model():
                                                                               # initial_state_fw=init_fw_state,
                                                                               # initial_state_bw=init_bw_state,
                                                                               )
+            # final_states
+        # bi_arg1_final_states_c = tf.concat([arg1_final_states[0][0], arg1_final_states[1][0]], axis=1)
+        # bi_arg2_final_states_c = tf.concat([arg2_final_states[0][0], arg2_final_states[1][0]], axis=1)
+        # rnn_out = tf.concat([bi_arg1_final_states_c, bi_arg2_final_states_c], axis=1)
+        # rnn_out_drop = tf.layers.dropout(rnn_out, rate=dropout, training=self.trainable)
 
-
-        bi_arg1_final_states_c = tf.concat([arg1_final_states[0][0], arg1_final_states[1][0]], axis=1)
-        bi_arg2_final_states_c = tf.concat([arg2_final_states[0][0], arg2_final_states[1][0]], axis=1)
-        # [batch_size,2*hidden_size] => [batch_size,4*hidden_size]
-        rnn_out = tf.concat([bi_arg1_final_states_c, bi_arg2_final_states_c], axis=1)
-
+        arg1_outputs = tf.concat([arg1_outputs[0],arg1_outputs[1]],axis=2)
+        arg2_outputs = tf.concat([arg2_outputs[0],arg2_outputs[1]],axis=2)
         arg1_outputs_drop = tf.layers.dropout(arg1_outputs, rate=dropout, training=self.trainable)
-
         arg2_outputs_drop = tf.layers.dropout(arg2_outputs, rate=dropout, training=self.trainable)
 
-        rnn_out_drop = tf.layers.dropout(rnn_out, rate=dropout, training=self.trainable)
-
         # GCN
-        self.A_matrix = self.get_A_matrix(arg1_outputs_drop, arg2_outputs_drop)
-        self.A_concat = self.get_A_concat_matrix(self.A_matrix)
-        self.D_matrix = self.get_D_matrix(self.A_concat)
-        self.N_A_matirx = tf.matmul(self.D_matrix,self.A_concat)
-        self.N_A_matirx = tf.matmul(self.N_A_matirx,self.D_matrix)
-        print('N_A',self.N_A_matirx)
         '''
-        for i in range(self.input_size):
-            piece = tf.matmul(self.D_matrix[i],self.A_concat[i])
-            piece = tf.expand_dims(tf.matmul(piece,self.D_matrix[i]),axis=0)
-            if i == 0:
-                self.N_A_matirx  = piece
-            else:
-                self.N_A_matirx = tf.concat([self.N_A_matirx,piece],axis=0)
+        # multi-head attention
+        if self.trainable == True:
+            mode = tf.estimator.ModeKeys.TRAIN
+        else:
+            mode = tf.estimator.ModeKeys.PREDICT
+        _, self.mh_att = transformer.multi_head_attention(num_heads=4,
+                                                          queries=arg1_outputs_drop,
+                                                          memory=arg2_outputs_drop,
+                                                          num_units=FLAGS.rnn_size * 2,
+                                                          mode=mode,
+                                                          return_attention=True,
+                                                          dropout=0.2
+                                                          )
+        self.mh_att = tf.nn.softmax(tf.reduce_mean(self.mh_att, axis=1))
+        print('A_multi:', self.mh_att)
+        self.A_matrix = self.mh_att
         '''
-        self.X_matrix = tf.concat([arg1_outputs_drop,arg2_outputs_drop],axis=2)
 
+        self.X_matrix = tf.concat([arg1_outputs_drop, arg2_outputs_drop], axis=1, name="lstm_initial_X_matrix")
+
+
+        # self.X_matrix = self.embedding_postprocessor(self.X_matrix,
+        #                                              position_embedding_name="position_embeddings",
+        #                                              initializer_range=0.02,
+        #                                              max_position_embeddings=self.X_matrix.shape[1].value
+        #                                              )
+        # get adjacent matrix
+        self.A_matrix = self.get_A_matrix(arg1_outputs_drop, arg2_outputs_drop)
+        # degree matrix d, D = d^-1/2
+        self.D_matrix = self.get_D_matrix(self.A_matrix)
+        # Normalized matrix Norm_A_matrix = DAD
+        self.Norm_A_matrix = tf.matmul(tf.matmul(self.D_matrix,self.A_matrix),self.D_matrix,name="Norm_A_matrix")
+        # one-layer graph convolution
         W1 = tf.Variable(tf.truncated_normal([rnn_size*2, gcn_size], stddev=0.1),name='gcn_weights')
         b1 = tf.Variable(tf.zeros([gcn_size]))
         for i in range(self.input_size):
-            temp = tf.concat([self.X_matrix[0][i],self.X_matrix[1][i]],axis=1)
+            temp = self.X_matrix[i]
             # temp = tf.nn.dropout(temp, 0.5)
-
             pre_sup = tf.matmul(temp, W1)
-            output = tf.matmul(self.N_A_matirx[i], pre_sup)
+            output = tf.matmul(self.Norm_A_matrix[i], pre_sup)
             output = tf.expand_dims(output,axis=0)
             # bias
             output += b1
@@ -155,7 +169,8 @@ class idr_base_model():
             else:
                 outputs = tf.concat([outputs,output],axis=0)
         self.outputs = tf.nn.relu(outputs)
-
+        '''
+        # get last nodes of arg1&arg2 for classification
         for i in range(batch_size):
             arg1_last_node = tf.expand_dims(outputs[i][self.arg1_len[i]-1],axis=0)
             arg2_last_node = tf.expand_dims(outputs[i][self.arg1_max_len+self.arg2_len[i]-1],axis=0)
@@ -164,41 +179,39 @@ class idr_base_model():
                 last_nodes = last_node
             else:
                 last_nodes = tf.concat([last_nodes,last_node],axis=0)
-
+        '''
+        # or pooling for classification
         outputs_max = tf.reduce_max(outputs,axis=1)
         outputs_mean = tf.reduce_mean(outputs,axis=1)
+        # inputs of dense layer
+        dense_inputs = tf.concat([outputs_mean,outputs_max],axis=1)
+        # dense_inputs = last_nodes
 
-        dense_inputs = tf.concat([last_nodes,outputs_max],axis=1)
-        dense_inputs = last_nodes
-
+        # dense layers for classification
         dense1_out = tf.layers.dense(dense_inputs, 64, name='dense1', reuse=False,
-                                     kernel_regularizer=tf.contrib.layers.l2_regularizer(0.5))
+                                     # kernel_regularizer=tf.contrib.layers.l2_regularizer(1.)
+                                     )
         dense1_out_drop = tf.layers.dropout(dense1_out, rate=dropout, training=self.trainable)
         dense1_out_ac = tf.nn.relu(dense1_out_drop)
-
         batch_mean, batch_var = tf.nn.moments(dense1_out_ac, [0])
         scale2 = tf.get_variable('bn_scale', initializer=tf.ones([64]))
         beta2 = tf.get_variable('bn_beta', initializer=tf.zeros([64]))
         dense1_out_bn = tf.nn.batch_normalization(dense1_out_ac, batch_mean, batch_var, beta2, scale2, epsilon_bn)
-
         self.dense2_out = tf.layers.dense(dense1_out_ac, classes, name='dense2', reuse=False,
-                                          kernel_regularizer=tf.contrib.layers.l2_regularizer(0.5))
-
+                                          # kernel_regularizer=tf.contrib.layers.l2_regularizer(1.)
+                                          )
         self.out = tf.nn.softmax(self.dense2_out)
         self.predict = tf.argmax(self.dense2_out, axis=1)
         self.loss = tf.losses.sparse_softmax_cross_entropy(self.labels, self.dense2_out)
-        self.loss += tf.add_n([tf.nn.l2_loss(var) for var in tf.trainable_variables() if 'weights' in var.name])
-
-
+        # self.loss += tf.add_n([tf.nn.l2_loss(var) for var in tf.trainable_variables() if 'weights' in var.name])
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         with tf.control_dependencies(update_ops):
             if gd_op=='GD':
                 optimizer = tf.train.GradientDescentOptimizer(self.lr)
             elif gd_op=='Adam':
                 optimizer = tf.train.AdamOptimizer(self.lr)
-
             gradients, v = zip(*optimizer.compute_gradients(self.loss))
-            # 梯度截断
+            # gradients clipping
             gradients, _ = tf.clip_by_global_norm(gradients, clip_value)
             self.train_op = optimizer.apply_gradients(zip(gradients, v), global_step=self.global_step)
 
@@ -208,7 +221,6 @@ class idr_base_model():
             print('---epoch %d---' % epoch)
             if epoch > 1:
                 sess.run(self.lr_decay_op, feed_dict={self.lr_decay_factor: FLAGS.weight_decay})
-
             # 历史最小loss
             min_loss = float("inf")
             # 高于最近一次min_loss的loss次数
@@ -218,20 +230,16 @@ class idr_base_model():
                     arg1, arg2, arg1_len, arg2_len, label, arg1_max_len, arg2_max_len= data.next_multi_rel(batch_size, 'train')
                 else:
                     arg1, arg2, arg1_len, arg2_len, label, arg1_max_len, arg2_max_len= data.next_single_rel(batch_size, 'train')
-
                 fd = {self.arg1_ids: arg1,
                       self.arg2_ids: arg2,
                       self.labels: label,
                       self.arg1_len: arg1_len,
                       self.arg2_len: arg2_len,
-                      self.trainable: True,
-                      self.arg1_max_len:arg1_max_len,
-                      self.arg2_max_len:arg2_max_len}
-
+                      self.trainable: True
+                      }
                 step = sess.run(self.global_step)
                 v = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
                 loss, _ = sess.run([self.loss, self.train_op], feed_dict=fd)
-
                 # 开始不稳定，跳过
                 if iteration > 10:
                     # 大于等于最小loss
@@ -261,12 +269,11 @@ class idr_base_model():
                               self.arg2_ids: arg2[i*batch_size:(i+1)*batch_size],
                               self.arg1_len: arg1_len[i*batch_size:(i+1)*batch_size],
                               self.arg2_len: arg2_len[i*batch_size:(i+1)*batch_size],
-                              self.trainable: False,
-                              self.arg1_max_len:arg1_max_len,
-                              self.arg2_max_len:arg2_max_len}
-
+                              self.trainable: False
+                              }
                         predict, dense2_out, pre_pro, lr = sess.run([self.predict, self.dense2_out, self.out, self.lr],
                                                                     feed_dict=fd)
+
                         if i == 0:
                             predicts = predict
                             dense2_outs = dense2_out
@@ -280,9 +287,7 @@ class idr_base_model():
                           self.arg2_ids: arg2[-batch_size:],
                           self.arg1_len: arg1_len[-batch_size:],
                           self.arg2_len: arg2_len[-batch_size:],
-                          self.trainable: False,
-                          self.arg1_max_len: arg1_max_len,
-                          self.arg2_max_len: arg2_max_len
+                          self.trainable: False
                           }
                     predict, dense2_out, pre_pro, lr = sess.run([self.predict,
                                                                  self.dense2_out,
@@ -312,20 +317,18 @@ class idr_base_model():
                         f1 = metrics.f1_score(label, predicts, average='macro')
                         print( 'epoch:%d iter_num:%d train_loss:%.4f test_loss:%.4f acc:%.2f f1:%.4f lr: %.4f'
                                 % (epoch, iteration, loss, test_loss, acc, f1, lr))
-                        if f1>0.39:
+                        if f1>0.45:
                             f1_max = self._max_multi_f1(label_multi, pre_proes)
                             print('max_f1:',f1_max)
 
-    def embedding_postprocessor(input_tensor,
-                                use_token_type=False,
-                                token_type_ids=None,
-                                token_type_vocab_size=16,
-                                token_type_embedding_name="token_type_embeddings",
+    # positional embedding
+    def embedding_postprocessor(self,
+                                input_tensor,
                                 use_position_embeddings=True,
                                 position_embedding_name="position_embeddings",
-                                initializer_range=0.02,
-                                max_position_embeddings=512,
-                                dropout_prob=0.1):
+                                initializer_range=0.0002,
+                                max_position_embeddings=512
+                                ):
         """Performs various post-processing on a word embedding tensor.
         Args:
           input_tensor: float Tensor of shape [batch_size, seq_length,
@@ -350,37 +353,19 @@ class idr_base_model():
         Raises:
           ValueError: One of the tensor shapes or input values is invalid.
         """
-        input_shape = get_shape_list(input_tensor, expected_rank=3)
+        input_shape = input_tensor.shape.as_list()
+        print('input_shape',input_shape)
         batch_size = input_shape[0]
-        seq_length = input_shape[1]
+        seq_length = max_position_embeddings
         width = input_shape[2]
-
         output = input_tensor
-
-        if use_token_type:
-            if token_type_ids is None:
-                raise ValueError("`token_type_ids` must be specified if"
-                                 "`use_token_type` is True.")
-            token_type_table = tf.get_variable(
-                name=token_type_embedding_name,
-                shape=[token_type_vocab_size, width],
-                initializer=create_initializer(initializer_range))
-            # This vocab will be small so we always do one-hot here, since it is always
-            # faster for a small vocabulary.
-            flat_token_type_ids = tf.reshape(token_type_ids, [-1])
-            one_hot_ids = tf.one_hot(flat_token_type_ids, depth=token_type_vocab_size)
-            token_type_embeddings = tf.matmul(one_hot_ids, token_type_table)
-            token_type_embeddings = tf.reshape(token_type_embeddings,
-                                               [batch_size, seq_length, width])
-            output += token_type_embeddings
-
         if use_position_embeddings:
             assert_op = tf.assert_less_equal(seq_length, max_position_embeddings)
             with tf.control_dependencies([assert_op]):
                 full_position_embeddings = tf.get_variable(
                     name=position_embedding_name,
-                    shape=[max_position_embeddings, width],
-                    initializer=create_initializer(initializer_range))
+                    shape=[seq_length, width],
+                    initializer= tf.truncated_normal_initializer(stddev=initializer_range))
                 # Since the position embedding table is a learned variable, we create it
                 # using a (long) sequence length `max_position_embeddings`. The actual
                 # sequence length might be shorter than this, for faster training of
@@ -393,7 +378,6 @@ class idr_base_model():
                 position_embeddings = tf.slice(full_position_embeddings, [0, 0],
                                                [seq_length, -1])
                 num_dims = len(output.shape.as_list())
-
                 # Only the last two dimensions are relevant (`seq_length` and `width`), so
                 # we broadcast among the first dimensions, which is typically just
                 # the batch size.
@@ -401,64 +385,63 @@ class idr_base_model():
                 for _ in range(num_dims - 2):
                     position_broadcast_shape.append(1)
                 position_broadcast_shape.extend([seq_length, width])
+                print(position_broadcast_shape)
                 position_embeddings = tf.reshape(position_embeddings,
                                                  position_broadcast_shape)
                 output += position_embeddings
-
-        output = layer_norm_and_dropout(output, dropout_prob)
+                print(output)
         return output
+
 
     def get_A_matrix(self, agu1, agu2):
 
         # agu1,agu2: [batch_size,seq_length,embedding_dim]
-        # agu1_trans = tf.transpose(agu1,[1,0,2])
-        # agu2_trans = tf.transpose(agu2,[1,0,2])
-        for i in range(self.input_size):
-            agu1_fw_bw = tf.concat([agu1[0][i],agu1[1][i]],axis=1)
-            agu2_fw_bw = tf.concat([agu2[0][i],agu2[1][i]],axis=1)
-            score_ij = tf.nn.softmax(
-                tf.matmul(agu1_fw_bw, agu2_fw_bw, transpose_a=False, transpose_b=True))  # score_ij :[arg1_seq_length,arg2_seq_length]
-            score_ij = tf.expand_dims(score_ij, axis=0, name='score_ij')
+        self.A_matrix = tf.nn.softmax(
+            tf.matmul(agu1, agu2, transpose_a=False, transpose_b=True))  # score_ij :[arg1_seq_length,arg2_seq_length]
+        zeros = tf.zeros([FLAGS.batch_size, self.arg1_max_len, self.arg1_max_len], dtype=tf.float32)
+        tmp1 = tf.concat([zeros, self.A_matrix], axis=2)
+        A_trans = tf.transpose(self.A_matrix, [0, 2, 1])
+        zeros = tf.zeros([FLAGS.batch_size, self.arg2_max_len, self.arg2_max_len], dtype=tf.float32)
+        tmp2 = tf.concat([A_trans, zeros], axis=2)
+        concat = tf.concat([tmp1, tmp2], axis=1)
+        # adding self-connection
+        diag = tf.matrix_diag(tf.ones([2*FLAGS.seq_length]))
+        concat = tf.add(concat,diag, name='adjacent_matrix')
+        return concat
 
-            if i == 0:
-                self.A_matrix = score_ij
+    def get_bilinear_matrix(self,arg1,arg2):
+
+        W1 = tf.Variable(tf.truncated_normal([2*FLAGS.rnn_size, 2*FLAGS.rnn_size], stddev=0.1), name='inter_wei')
+        zeros = tf.zeros([FLAGS.seq_length,FLAGS.seq_length])
+        for i in range(FLAGS.batch_size):
+            matrix11 = zeros
+            matrix22 = zeros
+            matrix12 = tf.matmul(arg1[i], W1, transpose_a=False, transpose_b=True)
+            matrix12 = tf.expand_dims(tf.nn.softmax(
+                tf.matmul(matrix12, arg2[i], transpose_a=False, transpose_b=True)),axis=0)
+            if i==0:
+                self.matrix11 = matrix11
+                self.matrix22 = matrix22
+                self.matrix12 = matrix12
             else:
-                self.A_matrix = tf.concat([self.A_matrix, score_ij], axis=0, name='A_matrix')
-
-        # print('A_matrix:',self.A_matrix)
+                self.matrix11 = tf.concat([self.matrix11,matrix11],axis=0)
+                self.matrix22 = tf.concat([self.matrix22,matrix22],axis=0)
+                self.matrix12 = tf.concat([self.matrix12,matrix12],axis=0)
+        self.matrix21 =  tf.transpose(self.matrix12, [0, 2, 1])
+        self.matrix1 = tf.concat([self.matrix11,self.matrix12],axis=2)
+        self.matrix2 = tf.concat([self.matrix21,self.matrix22],axis=2)
+        self.A_matrix = tf.concat([self.matrix1,self.matrix2],axis=1)
         return self.A_matrix
 
-    def get_A_concat_matrix(self,A_matrix):
-
-        zeros = tf.zeros([FLAGS.batch_size,self.arg1_max_len,self.arg1_max_len],dtype=tf.float32)
-        print(zeros)
-        tmp1 = tf.concat([zeros,A_matrix],axis=2)
-        A_trans = tf.transpose(A_matrix,[0,2,1])
-        zeros = tf.zeros([FLAGS.batch_size, self.arg2_max_len, self.arg2_max_len], dtype=tf.float32)
-        tmp2 = tf.concat([A_trans,zeros],axis=2)
-        concat = tf.concat([tmp1,tmp2],axis=1)
-        return concat
 
     def get_D_matrix(self,A):
         indices = []
-        # dense_shape = [FLAGS.batch_size,self.arg1_max_len+self.arg2_max_len,self.arg1_max_len+self.arg2_max_len]
-        # print(dense_shape)
-        v = tf.reduce_sum(A,axis=2)
-        # v = tf.reshape(v,[1,-1])
-        # v = tf.squeeze(v,axis=0)
-        # v = tf.pow(v,-0.5)
-        print(v)
-        diag = tf.expand_dims(tf.matrix_diag(tf.pow(v[0],-0.5)), axis=0)
+        d_matrix = tf.reduce_sum(A,axis=2,name="degree_matrix")
+        print(d_matrix)
+        diag = tf.expand_dims(tf.matrix_diag(tf.pow(d_matrix[0],-0.5)), axis=0)
         for i in range(1,FLAGS.batch_size):
-        #     for j in range(self.arg1_max_len+self.arg2_max_len):
-        #         indices.append([i,j,j])
-        # D = tf.SparseTensor(indices=indices, values=v, dense_shape=dense_shape)
-        # D = tf.sparse_tensor_to_dense(D,
-        #                           default_value=0,
-        #                           validate_indices=True,
-        #                           name=None)
-            one_diag = tf.expand_dims(tf.matrix_diag(tf.pow(v[i],-0.5)), axis=0)
-            diag = tf.concat([diag, one_diag], axis=0)
+            one_diag = tf.expand_dims(tf.matrix_diag(tf.pow(d_matrix[i],-0.5)), axis=0)
+            diag = tf.concat([diag, one_diag], axis=0,name="D_matrix")
         print(diag)
         return diag
 
@@ -498,28 +481,7 @@ class idr_base_model():
         # boundary = 1-(f1s.index(max_f1)+10)*0.01
         return max_f1, max_f1_weight
 
-    # def _max_multi_f1(self, label, pre_pro):
-    #     exp_pro = pre_pro[:, 0]
-    #     con_pro = pre_pro[:, 1]
-    #     com_pro = pre_pro[:, 2]
-    #     tem_pro = pre_pro[:, 3]
-    #
-    #     def is_true(label_index, one_label):
-    #         if label_index == one_label:
-    #             return 1
-    #         else:
-    #             return 0
-    #
-    #     exp_label = [is_true(0, sample) for sample in label]
-    #     con_label = [is_true(1, sample) for sample in label]
-    #     com_label = [is_true(2, sample) for sample in label]
-    #     tem_label = [is_true(3, sample) for sample in label]
-    #
-    #     self._max_f1(exp_label, exp_pro)
 
-        # 计算各个类别的f1,鉴于label(y-true)存在多个label的特殊性，使用以后api效果欠佳
-        # label-每个样本可能存在多个类别
-        # distribution-各个类别的样本比例，list类型
     def _calculate_acc_f1(self, label, predict, distribution, class_num=4):
 
         # 预测正确的样本数量
@@ -558,7 +520,6 @@ class idr_base_model():
         acc_list = []
         # 保存偏移量
         offset_list = []
-
         # one 即当前的offset，三个参数，固定第一个参数
         for one in itertools.product(np.arange(-0.4, 0.41, 0.05), repeat=3):
             one = list(one)
@@ -585,7 +546,7 @@ class idr_base_model():
 
 if __name__ == '__main__':
     start_time = time.time()
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
 
@@ -606,9 +567,19 @@ if __name__ == '__main__':
     # 14000 19400 22200 24600
 
     sess = tf.Session(config=config)
-    para_dict = {'batch_size': FLAGS.batch_size, 'learning_rate': FLAGS.learning_rate, 'vocabulary_size': 72847, 'embedding_size': FLAGS.embedding_size,
-                 'rnn_size': FLAGS.rnn_size, 'gcn_size':FLAGS.gcn_size,'clip_value': 5, 'epoch': FLAGS.epochs, 'iterations': 250, 'embedding': data.embedding,
-                 'sess':sess, 'gd_op':"Adam", 'classes':FLAGS.classes}
+    para_dict = {'batch_size': FLAGS.batch_size,
+                 'learning_rate': FLAGS.learning_rate,
+                 'vocabulary_size': 72847,
+                 'embedding_size': FLAGS.embedding_size,
+                 'rnn_size': FLAGS.rnn_size,
+                 'gcn_size':FLAGS.gcn_size,
+                 'clip_value': 5,
+                 'epoch': FLAGS.epochs,
+                 'iterations': 250,
+                 'embedding': data.embedding,
+                 'sess':sess,
+                 'gd_op':"Adam",
+                 'classes':FLAGS.classes}
     print('batch_size:',FLAGS.batch_size)
     print('rnn_size:',FLAGS.rnn_size)
     print('gcn_size:',FLAGS.gcn_size)
