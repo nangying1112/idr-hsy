@@ -1,7 +1,7 @@
 import copy
 import math
 import os
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,6 +61,7 @@ class compAggWikiqa(nn.Module):
                 var1 = self.layer1(input)
                 var1 = var1.view(-1)
                 out = F.log_softmax(var1)
+                # out = F.softmax(var1)
                 return out
 
         self.soft_module = TempNet(mem_dim)
@@ -218,11 +219,10 @@ class compAggWikiqa(nn.Module):
                 # print('pool',type(conv[i].data))
                 # print('pool',type(pool[i].data))
                 concate = torch.cat(pool, 1)  # JoinTable(2).updateOutput(pool)
-                # print('concate',type(concate.data))
                 linear1 = self.linear1(concate)
                 # print('linear1',type(linear1.data))
                 output = self.tanh1(linear1)
-                # print('output',type(output.data))
+                # print('output',output)
                 return output
 
         conv_module = NewConvModule(window_sizes, cov_dim, mem_dim)
@@ -276,14 +276,11 @@ class compAggWikiqa(nn.Module):
         # print('sim_output',type(sim_output.data))
 
         conv_output = self.conv_module.forward(sim_output, data_as_len)
-        # print('conv_output',type(conv_output.data))
+        # print('conv_output',conv_output.data)
 
         soft_output = self.soft_module.forward(conv_output)
-        # soft_output = nn.Linear(150, len(data_as))(conv_output).sum(0)[0]
-        # print('soft_output',type(soft_output.data))
-        # print()
-        # print()
-        return soft_output
+
+        return conv_output,soft_output
 
     def predict(self, data_raw):
         data_q, data_as, label = data_raw
@@ -394,6 +391,51 @@ class compAggWikiqa(nn.Module):
         # torch.save({"params": self.params, "config": config}, paraBestPath)
 
 
+def pretrain(model: compAggWikiqa, dataset: list,opt,current_epoch):
+    model.proj_modules.train()
+    model.dropout_modules.train()
+    # for i in range(2):
+    #     model.proj_modules[i].train()
+    #     model.dropout_modules[i].train()
+
+    model.emb_vecs.train()
+    model.conv_module.train()
+
+    dataset_size = len(dataset)
+    # indices = randperm(dataset_size)
+    indices = [667] + [x for x in range(667)] + [x for x in range(668, 873)]  # TODO: remove me
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=4e-4)
+    for i in range(0, dataset_size, model.batch_size):  # TODO change me for debug: # 1, model.batch_size):
+        # print('i',i)
+        batch_size = min(model.batch_size,
+                         dataset_size - i)  # min(i + model.batch_size - 1, dataset_size) - i + 1  # TODO: why?
+        # print('batch_size',batch_size)
+
+        loss = 0.
+        for j in range(0, batch_size):
+            idx = indices[i + j]
+            data_raw = dataset[idx]
+            data_q, data_as, label = data_raw
+            data_q = data_q.cuda()
+            for k in range(len(data_as)):
+                data_as[k] = data_as[k].cuda()
+            label = Variable(label, requires_grad=False).cuda()
+            soft_output = model(data_q, data_as)
+            # print(soft_output)
+            example_loss = model.criterion(soft_output, label)
+            # print(example_loss)
+            loss += example_loss
+        loss = loss / batch_size
+
+        if (i / opt.batch_size) % 10 == 0:
+            print('pretrain epoch %d, step %d, loss' % (current_epoch + 1, i / opt.batch_size), loss.data.cpu().numpy()[0])
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+
 def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
     model.proj_modules.train()
     model.dropout_modules.train()
@@ -408,7 +450,7 @@ def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
     # indices = randperm(dataset_size)
     indices = [667] + [x for x in range(667)] + [x for x in range(668, 873)]  # TODO: remove me
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=4e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
     for i in range(0, dataset_size, model.batch_size):  # TODO change me for debug: # 1, model.batch_size):
         # print('i',i)
         batch_size = min(model.batch_size,
@@ -426,24 +468,35 @@ def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
             label = Variable(label, requires_grad=False).cuda()
 
             soft_output = model(data_q, data_as)
-            example_loss = model.criterion(soft_output, label)
+
+            # print('soft',soft_output)
+            conf = soft_output.data.cpu().numpy() # conf -> confidence -> 置信度
+            # print('conf',conf)
+            # print('label',label)
+
+            rewards = np.full(len(conf),1.)
+            previous_map = 1.
+            for k in range(1,len(conf)+1):
+                top_i_th_conf = soft_output.data[:k]
+                top_i_th_gt = label.data[:k]
+                if torch.sum(top_i_th_gt) == 0:
+                    continue
+                cur_map = MAP(top_i_th_gt,top_i_th_conf)  # current MAP
+                # print('cur_map',i,cur_map)
+                rewards[k-1] = rewards[k-1] + previous_map - cur_map
+                previous_map = cur_map
+            # print('rewards',rewards)
+            rewards = torch.cuda.FloatTensor(rewards)
+            example_loss = 0.
+            for k in range(len(label)):
+                # print(rewards[k])
+                # print(model.criterion(soft_output[k], label[k]))
+                example_loss += rewards[k]*model.criterion(soft_output[k], label[k])
             loss += example_loss
         loss = loss / batch_size
-        # l2 regularization
-        # lam = Variable(torch.cuda.FloatTensor([1e-5]), requires_grad=False)
-        # l2_reg = Variable(torch.cuda.FloatTensor([0.]), requires_grad=False)
-        # # print([param.name for param in model.parameters()])
-        # for name,param in model.named_parameters():
-        #     if param.requires_grad:
-        #         l2_reg = l2_reg+torch.norm(param)
-        #         # print(l2_reg)
-        #         # print(lam)
-        #         # print(loss)
-        #         # print(lam * l2_reg)
-        #         loss = loss+lam *l2_reg
 
         if (i/opt.batch_size)%10 == 0:
-            print('epoch %d, step %d, loss' % (current_epoch+1, i/opt.batch_size), loss.data.cpu().numpy()[0])
+            print('train epoch %d, step %d, loss' % (current_epoch+1, i/opt.batch_size), loss.data.cpu().numpy()[0])
 
         optimizer.zero_grad()
         loss.backward()
