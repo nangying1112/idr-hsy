@@ -15,6 +15,7 @@ from util.utils import MAP, MRR
 from random import shuffle
 
 class compAggWikiqa(nn.Module):
+
     def __init__(self, args):
         super(compAggWikiqa, self).__init__()
         self.mem_dim = args.mem_dim
@@ -34,83 +35,44 @@ class compAggWikiqa(nn.Module):
         self.window_sizes = args.window_sizes
         self.window_large = args.window_large
         self.gpu = args.gpu
-
         self.best_score = 0
 
         self.emb_vecs = nn.Embedding(self.numWords, self.emb_dim)
-        self.emb_vecs.weight.data = tr.loadVacab2Emb(self.task) # no glove
+        self.emb_vecs.weight.data = tr.loadVacab2Emb(self.task)
 
-        # self.proj_module_master = self.new_proj_module()
         self.att_module_master = self.new_att_module()
-
         if self.comp_type == "mul":
             self.sim_sg_module = self.new_sim_mul_module()
         else:
             Exception("The word matching method is not provided")
 
         self.conv_module = self.new_conv_module()
-
         mem_dim = self.mem_dim
 
         class TempNet(nn.Module):
             def __init__(self, mem_dim):
                 super(TempNet, self).__init__()
-                self.layer1 = nn.Linear(mem_dim, 2)
+                self.layer1 = nn.Linear(mem_dim, 1)
 
             def forward(self, input):
                 var1 = self.layer1(input)
+                var1 = var1.view(-1)
+                # print('var1',var1)
                 out = F.log_softmax(var1)
-                # out = F.softmax(var1)
-                return out
-
-        class RL_TempNet(nn.Module):
-            def __init__(self, mem_dim):
-                super(RL_TempNet, self).__init__()
-                self.layer1 = nn.Linear(mem_dim, 2)
-
-            def forward(self, input):
-                var1 = self.layer1(input)
-                out = F.log_softmax(var1)
+                # print(out)
                 return out
 
         self.soft_module = TempNet(mem_dim)
-        self.rl_soft_module = RL_TempNet(100)
-
-        # self.join_module = lambda x: torch.cat(x, 0)
-
         self.optim_state = {"learningRate": self.learning_rate}
         self.criterion = nn.KLDivLoss()
-
-        # That's a bug in pytorch, Container.py's parameters()
-        def get_container_parameters(container):
-            w = []
-            gw = []
-            for module in container.modules:
-                mparam = list(module.parameters())
-                if mparam:
-                    w.extend(mparam[0])
-                    gw.extend(mparam[1])
-            if not w:
-                return
-            return w, gw
-
-        # self.params, self.grad_params = get_container_parameters(modules)
-        # print("Parameter size: %s" % self.params[0].size())
-        # self.best_params = self.params.copy()  # TODO: revisit
+        self.relu = nn.ReLU()
         self.dropout_modules = [None] * 2
         self.proj_modules = [None] * 2
-        # self.att_modules = [None] * 2
-
         self.proj_modules = self.new_proj_module()
         self.dropout_modules = nn.Dropout(self.dropoutP)
-        # for i in range(2):
-        #     self.proj_modules[i] = new_proj_mod
-        #     self.dropout_modules[i] = dropout_mod
-        self.neg_trans = nn.Linear(mem_dim,100)
-        self.pos_trans = nn.Linear(mem_dim,100)
-        self.cur_trans = nn.Linear(mem_dim,100)
+        self.cur_trans = nn.Linear(mem_dim,150)
+        self.state_trans = nn.Linear(mem_dim,150)
         # self.cos = nn.CosineSimilarity(dim=1,eps=1e-6)
-
 
     def new_proj_module(self):
         emb_dim = self.emb_dim
@@ -128,15 +90,10 @@ class compAggWikiqa(nn.Module):
                 # why project two times??
                 i = nn.Sigmoid()(self.linear1(input))
                 u = nn.Tanh()(self.linear2(input))
-                out = i.mul(u)  # CMulTable().updateOutput([i, u])
+                out = i.mul(u)
                 return out
 
         module = NewProjModule(emb_dim, mem_dim)
-
-        # if getattr(self, "proj_module_master", None):  # share parameters
-        #     for (tar_param, src_param) in zip(module.parameters(), self.proj_module_master.parameters()):
-        #         tar_param.grad.data = src_param.grad.data.clone()
-
         return module
 
     def new_att_module(self):
@@ -146,7 +103,6 @@ class compAggWikiqa(nn.Module):
                 super(NewAttModule, self).__init__()
 
             def forward(self, linput, rinput):
-                #
                 self.lPad = linput.view(-1, linput.size(0), linput.size(1))
 
                 self.lPad = linput  # self.lPad = Padding(0, 0)(linput) TODO: figureout why padding?
@@ -170,12 +126,10 @@ class compAggWikiqa(nn.Module):
         class TemporalConvoluation(nn.Module):
             def __init__(self, cov_dim, mem_dim, window_size):
                 super(TemporalConvoluation, self).__init__()
-                self.conv1 = nn.Conv1d(cov_dim, mem_dim, window_size)\
-                    # .cuda()
+                self.conv1 = nn.Conv1d(cov_dim, mem_dim, window_size).cuda()
 
             def forward(self, input):
                 myinput = input.view(1, input.size()[0], input.size()[1]).transpose(1, 2)  # 1, 150, 56
-                # print('myinput',myinput)
                 output = self.conv1(myinput)[0].transpose(0, 1)  # 56, 150
                 return output
 
@@ -183,11 +137,8 @@ class compAggWikiqa(nn.Module):
             def __init__(self, cov_dim, mem_dim, window_size):
                 super(MyTemporalConvoluation2, self).__init__()
                 self.inp, self.outp, self.kw, self.dw = cov_dim, mem_dim, window_size, 1
-
-                self.weight = Variable(torch.Tensor(self.outp, self.inp * self.kw), requires_grad=False)
-                self.bias = Variable(torch.Tensor(self.outp), requires_grad=False)
-                # self.weight = Variable(torch.cuda.Tensor(self.outp, self.inp * self.kw), requires_grad=False)
-                # self.bias = Variable(torch.cuda.Tensor(self.outp), requires_grad=False)
+                self.weight = Variable(torch.cuda.Tensor(self.outp, self.inp * self.kw), requires_grad=False)
+                self.bias = Variable(torch.cuda.Tensor(self.outp), requires_grad=False)
                 self.reset()
 
             def reset(self, stdv=None):
@@ -204,8 +155,7 @@ class compAggWikiqa(nn.Module):
                 bias = self.bias
                 nOutputFrame = int((input.size(0) - self.kw) / self.dw + 1)
 
-                output = Variable(torch.FloatTensor(nOutputFrame, self.outp))
-                # output = Variable(torch.cuda.FloatTensor(nOutputFrame, self.outp))
+                output = Variable(torch.cuda.FloatTensor(nOutputFrame, self.outp))
 
                 for i in range(input.size(0)):  # do -- for each sequence element
                     element = input[i]  # ; -- features of ith sequence element
@@ -260,86 +210,69 @@ class compAggWikiqa(nn.Module):
 
     def forward(self, data_q, data_as):
         # print('data_q',type(data_q))
-        # data_as_len = torch.cuda.IntTensor(len(data_as))
-        data_as_len = torch.IntTensor(len(data_as))
+        data_as_len = torch.cuda.IntTensor(len(data_as))
+        # data_as_len = torch.IntTensor(len(data_as))
 
         for k in range(len(data_as)):
             data_as_len[k] = data_as[k].size()[0]
             # Set the answer with a length less than 5 to [0,0,0,0,0]
             if data_as_len[k] < self.window_large:
-                # as_tmp = torch.cuda.LongTensor(self.window_large).fill_(0)
-                as_tmp = torch.LongTensor(self.window_large).fill_(0)
-
+                as_tmp = torch.cuda.LongTensor(self.window_large).fill_(0)
+                # as_tmp = torch.LongTensor(self.window_large).fill_(0)
                 data_as[k] = as_tmp
                 data_as_len[k] = self.window_large
         data_as_word = torch.cat(data_as, 0)
         # print('data_as_word',data_as_word)
         inputs_a_emb = self.emb_vecs.forward(
-            Variable(data_as_word.type(torch.LongTensor),
+            Variable(data_as_word.type(torch.cuda.LongTensor),
                      requires_grad=False))  # TODO: why LongTensor would convert to Float
         inputs_q_emb = self.emb_vecs.forward(Variable(data_q, requires_grad=False))
 
-        # inputs_a_emb = self.dropout_modules[0].forward(inputs_a_emb)
-        # inputs_q_emb = self.dropout_modules[1].forward(inputs_q_emb)
         inputs_a_emb = self.dropout_modules.forward(inputs_a_emb)
         inputs_q_emb = self.dropout_modules.forward(inputs_q_emb)
 
-        # projs_a_emb = self.proj_modules[0].forward(inputs_a_emb)
-        # projs_q_emb = self.proj_modules[1].forward(inputs_q_emb)
         projs_a_emb = self.proj_modules.forward(inputs_a_emb)
         projs_q_emb = self.proj_modules.forward(inputs_q_emb)
 
         if data_q.size()[0] == 1:
             projs_q_emb = projs_q_emb.resize(1, self.mem_dim)
-        # print('proj',projs_a_emb.size(),projs_q_emb.size())
         # question-awared answer representation
         att_output = self.att_module_master.forward(projs_q_emb, projs_a_emb)
         # print('att_output',att_output.size())
-
         sim_output = self.sim_sg_module.forward(projs_a_emb, att_output)
         # print('sim_output',sim_output.size())
-
         conv_output = self.conv_module.forward(sim_output, data_as_len)
         # print('conv_output',conv_output.size())
-
         soft_output = self.soft_module.forward(conv_output)
 
         return conv_output,soft_output
 
-    # def predict(self,data_raw):
 
-    def predict(self, data_raw):
+    def predict(self, data_raw,rl_predict=False):
         data_q, data_as, label = data_raw
-        # print(len(data_raw))
         # label = Variable(label, requires_grad=False)
-        data_q = data_q\
-            # .cuda()
-        for i in range(len(data_as)):
-            data_as[i] = data_as[i]\
-                # .cuda()
-        data_as_len = torch.IntTensor(len(data_as))
+        data_q = data_q.cuda()
+        for k in range(len(data_as)):
+            data_as[k] = data_as[k].cuda()
+        data_as_len = torch.cuda.IntTensor(len(data_as))
 
         for k in range(len(data_as)):
             data_as_len[k] = data_as[k].size()[0]
             if data_as_len[k] < self.window_large:
-                as_tmp = torch.LongTensor(self.window_large).fill_(0)
+                as_tmp = torch.cuda.LongTensor(self.window_large).fill_(0)
                 as_tmp[0:data_as_len[k]] = copy.deepcopy(data_as[k])
                 data_as[k] = as_tmp
                 data_as_len[k] = self.window_large
 
         data_as_word = torch.cat(data_as, 0)
         inputs_a_emb = self.emb_vecs.forward(
-            Variable(data_as_word.type(torch.LongTensor),
+            Variable(data_as_word.type(torch.cuda.LongTensor),
                      requires_grad=False))
         inputs_q_emb = self.emb_vecs.forward(Variable(data_q, requires_grad=False))
 
-        # inputs_a_emb = self.dropout_modules[0].forward(inputs_a_emb)
-        # inputs_q_emb = self.dropout_modules[1].forward(inputs_q_emb)
         inputs_a_emb = self.dropout_modules.forward(inputs_a_emb)
         inputs_q_emb = self.dropout_modules.forward(inputs_q_emb)
 
-        # projs_a_emb = self.proj_modules[0].forward(inputs_a_emb)
-        # projs_q_emb = self.proj_modules[1].forward(inputs_q_emb)
         projs_a_emb = self.proj_modules.forward(inputs_a_emb)
         projs_q_emb = self.proj_modules.forward(inputs_q_emb)
 
@@ -352,72 +285,48 @@ class compAggWikiqa(nn.Module):
 
         conv_output = self.conv_module.forward(sim_output, data_as_len)
         soft_output = self.soft_module.forward(conv_output)
-        q_a_score_np = soft_output.data.cpu().numpy()[:, 1]
-        q_a_state = conv_output
+        if rl_predict==False:
+            map = MAP(label, soft_output.data)
+            mrr = MRR(label, soft_output.data)
+        else:
+            q_a_score_np = soft_output.data.cpu().numpy()
+            q_a_state = conv_output
 
-        predict = np.argmax(soft_output.data.cpu().numpy(), axis=1)
-
-        for k in range(1, len(data_as) + 1):
-            if k == 1:
-                neg_a_index = np.argmin(
-                    q_a_score_np[0:])  # get the index of the most negative answer predicted in this step
-                pos_a_index = np.argmax(q_a_score_np[0:])  # positive
-
-                q_cur_state = self.cur_trans(q_a_state[0].view(1, q_a_state[0].size(0)))
-                if predict[pos_a_index] == 0 or predict[neg_a_index] == 1:
-                    new_score = self.rl_soft_module.forward(q_cur_state)
-                else:
-                    q_neg_state = self.neg_trans(q_a_state[neg_a_index].view(1, q_a_state[0].size(0)))
-                    q_pos_state = self.pos_trans(q_a_state[pos_a_index].view(1, q_a_state[0].size(0)))
-                    # cur_neg = self.cos(q_cur_state, q_neg_state)
-                    cur_neg = F.pairwise_distance(q_cur_state,q_neg_state,p=2, eps=1e-6)
-                    cur_pos = F.pairwise_distance(q_cur_state,q_pos_state,p=2, eps=1e-6)
-                    # cur_pos = self.cos(q_cur_state, q_pos_state)
-                    # print('cur_neg,cur_pos',cur_neg, cur_pos)
-                    new_score = F.log_softmax(torch.cat([cur_neg, cur_pos], 1))
-                    # print(new_score)
-
-            else:
-                q_cur_state = self.cur_trans(q_a_state[k - 1].view(1, q_a_state[0].size(0)))
-                neg_a_index = np.argmin(
-                    q_a_score_np[0:k])  # get the index of the most negative answer predicted in this step
+            rl_state = self.cur_trans(q_a_state[0].view(1, q_a_state[0].size(0)))
+            for k in range(2, len(data_as) + 1):
                 pos_a_index = np.argmax(q_a_score_np[0:k])  # positive
-                if predict[pos_a_index] == 0 or predict[neg_a_index] == 1:
-                    soft_output = self.rl_soft_module.forward(q_cur_state)
+                q_cur_state = q_a_state[k - 1].view(1, q_a_state[0].size(0))
+                if pos_a_index == k - 1:
+                    rl_state = torch.cat([rl_state, self.cur_trans(q_cur_state)], 0)
+                    # print('rl_state', rl_state.size())
                 else:
-                    q_neg_state = self.neg_trans(q_a_state[neg_a_index].view(1, q_a_state[0].size(0)))
-                    q_pos_state = self.pos_trans(q_a_state[pos_a_index].view(1, q_a_state[0].size(0)))
-                    # cur_neg = self.cos(q_cur_state, q_neg_state)
-                    cur_neg = F.pairwise_distance(q_cur_state,q_neg_state,p=2, eps=1e-6)
-                    cur_pos = F.pairwise_distance(q_cur_state,q_pos_state,p=2, eps=1e-6)
-                    # cur_pos = self.cos(q_cur_state, q_pos_state)
-                    # print('cur_neg,cur_pos', cur_neg, cur_pos)
-                    soft_output = F.log_softmax(torch.cat([cur_neg, cur_pos], 1))
-                    # print(new_score)
-                new_score = torch.cat([new_score, soft_output], 0)
+                    q_pos_cat = torch.cat([data_q, data_as[pos_a_index]])
+                    current_answer = []
+                    current_answer.append(data_as[k - 1])
+                    q_pos_cur_state, _ = self.forward(q_pos_cat, current_answer)
+                    rl_state = torch.cat([rl_state, self.state_trans(q_pos_cur_state.view(1, q_a_state[0].size(0)))])
+            # print(rl_state.size())
+            new_score = self.soft_module.forward(rl_state)
 
-        map = MAP(label[:,1], new_score.data[:,1])
-        mrr = MRR(label[:,1], new_score.data[:,1])
+            map = MAP(label, new_score.data)
+            mrr = MRR(label, new_score.data)
         return map, mrr
 
-    def predict_dataset(self,train_dataset,dev_dataset,test_dataset):
+
+    def predict_dataset(self,train_dataset,dev_dataset,test_dataset,rl_predict=False):
 
         self.proj_modules.eval()
         self.dropout_modules.eval()
-        # for i in range(2):
-        #     self.proj_modules[i].eval()
-        #     self.dropout_modules[i].eval()
-        # print(len(dataset))
         self.emb_vecs.eval()
         self.conv_module.eval()
 
-        datasets = [train_dataset,dev_dataset,test_dataset]
+        datasets = [dev_dataset,test_dataset]
         results = []
         for dataset in datasets:
             res = [0., 0.]
             dataset_size = len(dataset)
             for j in range(dataset_size):
-                prediction = self.predict(dataset[j])
+                prediction = self.predict(dataset[j],rl_predict=rl_predict)
                 res[0] = res[0] + prediction[0]
                 res[1] = res[1] + prediction[1]
 
@@ -425,6 +334,7 @@ class compAggWikiqa(nn.Module):
             res[1] = res[1] / dataset_size
             results.append(res)
         return results
+
 
     def save(self, path, config, result, epoch):
         # print(result)
@@ -442,66 +352,41 @@ class compAggWikiqa(nn.Module):
         for i, vals in enumerate(result):
             for _, val in enumerate(vals):
                 file.write('%s, ' % val)
-
             if i == 0:
-                print("Train: MAP: %s, MRR: %s" % (vals[0], vals[1]))
-            elif i == 1:
                 print("Dev: MAP: %s, MRR: %s" % (vals[0], vals[1]))
-            else:
+            elif i == 1:
                 print("Test: MAP: %s, MRR: %s" % (vals[0], vals[1]))
         print()
-
-
         file.write('\n')
         file.close()
-
-        # if result[0][0] > self.best_score:
-        #     self.best_score = result[0][0]
-        #     self.best_params = copy.deepcopy(self.params)
-        #     torch.save({"params": self.params, "config": config}, paraBestPath)
-        #
-        # torch.save({"params": self.params, "config": config}, paraBestPath)
 
 
 def pretrain(model: compAggWikiqa, dataset: list,opt,current_epoch):
     model.proj_modules.train()
     model.dropout_modules.train()
-    # for i in range(2):
-    #     model.proj_modules[i].train()
-    #     model.dropout_modules[i].train()
-
     model.emb_vecs.train()
     model.conv_module.train()
 
     dataset_size = len(dataset)
-    # indices = randperm(dataset_size)
     indices = [667] + [x for x in range(667)] + [x for x in range(668, 873)]  # TODO: remove me
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=4e-4)
     for i in range(0, dataset_size, model.batch_size):  # TODO change me for debug: # 1, model.batch_size):
-        # print('i',i)
         batch_size = min(model.batch_size,
                          dataset_size - i)  # min(i + model.batch_size - 1, dataset_size) - i + 1  # TODO: why?
-        # print('batch_size',batch_size)
-
         loss = 0.
         for j in range(0, batch_size):
             idx = indices[i + j]
             data_raw = dataset[idx]
             data_q, data_as, label = data_raw
-            data_q = data_q
+            data_q = data_q.cuda()
             for k in range(len(data_as)):
-                data_as[k] = data_as[k]
-            label = Variable(label, requires_grad=False)
+                data_as[k] = data_as[k].cuda()
+            label = Variable(label, requires_grad=False).cuda()
             _,soft_output = model(data_q, data_as)
-            # print(soft_output.size())
-            predict = soft_output[:,1]
-            # print(soft_output)
-            # print(label)
             example_loss = model.criterion(soft_output, label)
             loss += example_loss
         loss = loss / batch_size
-
         if (i / opt.batch_size) % 10 == 0:
             print('pretrain epoch %d, step %d, loss' % (current_epoch + 1, i / opt.batch_size), loss.data.cpu().numpy())
 
@@ -512,17 +397,13 @@ def pretrain(model: compAggWikiqa, dataset: list,opt,current_epoch):
 def rl_pretrain(model: compAggWikiqa, dataset: list,opt,current_epoch):
     model.proj_modules.train()
     model.dropout_modules.train()
-    # for i in range(2):
-    #     model.proj_modules[i].train()
-    #     model.dropout_modules[i].train()
-
     model.emb_vecs.train()
     model.conv_module.train()
     dataset_size = len(dataset)
     # indices = randperm(dataset_size)
     indices = [667] + [x for x in range(667)] + [x for x in range(668, 873)]  # TODO: remove me
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=opt.lr*(opt.lr_decay**current_epoch))
 
     for i in range(0, dataset_size, model.batch_size):  # TODO change me for debug: # 1, model.batch_size):
         batch_size = min(model.batch_size,
@@ -532,93 +413,53 @@ def rl_pretrain(model: compAggWikiqa, dataset: list,opt,current_epoch):
             idx = indices[i + j]
             data_raw = dataset[idx]
             data_q, data_as, label = data_raw
-
-            # shuffle
-            ids = [num for num in range(len(label))]
-            shuffle(ids)
-            new_data_as = []
-            new_label = torch.zeros([len(label), 2])
-            for k in range(len(ids)):
-                new_data_as.append(data_as[ids[k]])
-                new_label[k] = label[ids[k]]
-            new_label = torch.FloatTensor(new_label)
-            data_as = new_data_as
-            label = new_label
-
-            data_as_len = torch.IntTensor(len(data_as))
+            data_q = data_q.cuda()
+            for k in range(len(data_as)):
+                data_as[k] = data_as[k].cuda()
+            data_as_len = torch.cuda.IntTensor(len(data_as))
             for k in range(len(data_as)):
                 data_as_len[k] = data_as[k].size()[0]
                 # Set the answer with a length less than 5 to [0,0,0,0,0]
                 if data_as_len[k] < model.window_large:
-                    as_tmp = torch.LongTensor(model.window_large).fill_(0)
+                    as_tmp = torch.cuda.LongTensor(model.window_large).fill_(0)
                     data_as[k] = as_tmp
                     data_as_len[k] = model.window_large
-            label = Variable(label, requires_grad=False)
+            label = Variable(label, requires_grad=False).cuda()
             # print('label',label)
             q_a_state, q_a_score = model(data_q, data_as)  # initially modeling the question and all answers
-            q_a_score_np = q_a_score.data.cpu().numpy()[:, 1]
-            predict = np.argmax(q_a_score.data.cpu().numpy(), axis=1)
-            # print('predict',predict)
+            # print('q_a',q_a_score)
+            q_a_score_np = q_a_score.data.cpu().numpy()
+            # predict = np.argmax(q_a_score.data.cpu().numpy(), axis=1)
 
-            if len(data_as) == 1:
-                continue
-            for k in range(1, len(data_as) + 1):
-                if k == 1:
-                    neg_a_index = np.argmin(
-                        q_a_score_np[1:])  # get the index of the most negative answer predicted in this step
-                    pos_a_index = np.argmax(q_a_score_np[1:])  # positive
-
-                    q_cur_state = model.cur_trans(q_a_state[0].view(1, q_a_state[0].size(0)))
-                    if predict[pos_a_index] == 0 or predict[neg_a_index] == 1:
-                        new_score = model.rl_soft_module.forward(q_cur_state)
-                    else:
-                        q_neg_state = model.neg_trans(q_a_state[neg_a_index].view(1, q_a_state[0].size(0)))
-                        q_pos_state = model.pos_trans(q_a_state[pos_a_index].view(1, q_a_state[0].size(0)))
-                        # cur_neg = model.cos(q_cur_state, q_neg_state)
-                        cur_neg = F.pairwise_distance(q_cur_state, q_neg_state, p=2, eps=1e-6)
-                        cur_pos = F.pairwise_distance(q_cur_state, q_pos_state, p=2, eps=1e-6)
-                        # print('cur_pos,cur_neg',cur_pos)
-
-
-                        # cur_pos = model.cos(q_cur_state, q_pos_state)
-                        new_score = F.log_softmax(
-                            torch.cat([cur_neg, cur_pos], 1))
-                        # print(new_score)
-
+            rl_state = model.cur_trans(q_a_state[0].view(1, q_a_state[0].size(0)))
+            for k in range(2, len(data_as) + 1):
+                pos_a_index = np.argmax(q_a_score_np[0:k])  # positive
+                q_cur_state = q_a_state[k-1].view(1, q_a_state[0].size(0))
+                if pos_a_index == k-1:
+                    rl_state = torch.cat([rl_state,model.cur_trans(q_cur_state)],0)
+                    # print('rl_state',rl_state.size())
                 else:
-                    q_cur_state = model.cur_trans(q_a_state[k - 1].view(1, q_a_state[0].size(0)))
-                    neg_a_index = np.argmin(
-                        q_a_score_np[0:k])  # get the index of the most negative answer predicted in this step
-                    pos_a_index = np.argmax(q_a_score_np[0:k])  # positive
-                    if predict[pos_a_index] == 0 or predict[neg_a_index] == 1:
-                        soft_output = model.rl_soft_module.forward(q_cur_state)
-                        # print('aa',soft_output.size())
-                    else:
-                        q_neg_state = model.neg_trans(q_a_state[neg_a_index].view(1, q_a_state[0].size(0)))
-                        q_pos_state = model.pos_trans(q_a_state[pos_a_index].view(1, q_a_state[0].size(0)))
-                        # cur_neg = model.cos(q_cur_state, q_neg_state)
-                        cur_neg = F.pairwise_distance(q_cur_state, q_neg_state, p=2, eps=1e-6)
-                        cur_pos = F.pairwise_distance(q_cur_state, q_pos_state, p=2, eps=1e-6)
+                    q_pos_cat = torch.cat([data_q,data_as[pos_a_index]])
+                    current_answer = []
+                    current_answer.append(data_as[k-1])
+                    q_pos_cur_state,_ = model.forward(q_pos_cat,current_answer)
+                    rl_state = torch.cat([rl_state,model.state_trans(q_pos_cur_state.view(1,q_a_state[0].size(0)))])
+            # print(rl_state.size())
+            rl_state = model.relu(rl_state)
+            new_score = model.soft_module.forward(rl_state)
 
-                        # cur_pos = model.cos(q_cur_state, q_pos_state)
-                        # print('cur_neg,cur_pos',cur_neg, cur_pos)
-                        soft_output = F.log_softmax(
-                            torch.cat([cur_neg, cur_pos], 1))
-                    # print(new_score.size())
-                    # print(soft_output.size())
-
-                    new_score = torch.cat([new_score, soft_output], 0)
-            # print(new_score)
+            # print('new_score',new_score)
             example_loss = model.criterion(new_score, label)
             # print('example',example_loss)
             loss += example_loss
         loss = loss / batch_size
         # print(loss)
         if (i / opt.batch_size) % 10 == 0:
-            print('rl pretrain epoch %d, step %d, loss' % (current_epoch + 1, i / opt.batch_size), loss.data.cpu().numpy())
+            print('rl pretrain epoch %d, step %d, loss' % (current_epoch + 1, i / opt.batch_size), loss.data.cpu().numpy(),'lr:',opt.lr*(opt.lr_decay**current_epoch))
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
 
 def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
     model.proj_modules.train()
@@ -633,7 +474,7 @@ def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
     # indices = randperm(dataset_size)
     indices = [667] + [x for x in range(667)] + [x for x in range(668, 873)]  # TODO: remove me
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=4e-5*(opt.lr_decay**current_epoch))
 
     for i in range(0, dataset_size, model.batch_size):  # TODO change me for debug: # 1, model.batch_size):
         batch_size = min(model.batch_size,
@@ -644,92 +485,52 @@ def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
             idx = indices[i + j]
             data_raw = dataset[idx]
             data_q, data_as, label = data_raw
-
-            # shuffle
-            ids = [num for num in range(len(label))]
-            shuffle(ids)
-            new_data_as = []
-            new_label = torch.zeros([len(label), 2])
-            for k in range(len(ids)):
-                new_data_as.append(data_as[ids[k]])
-                new_label[k] = label[ids[k]]
-            new_label = torch.FloatTensor(new_label)
-            data_as = new_data_as
-            label = new_label
-
-            data_as_len = torch.IntTensor(len(data_as))
+            data_q = data_q.cuda()
+            for k in range(len(data_as)):
+                data_as[k] = data_as[k].cuda()
+            data_as_len = torch.cuda.IntTensor(len(data_as))
             for k in range(len(data_as)):
                 data_as_len[k] = data_as[k].size()[0]
                 # Set the answer with a length less than 5 to [0,0,0,0,0]
                 if data_as_len[k] < model.window_large:
-                    as_tmp = torch.LongTensor(model.window_large).fill_(0)
+                    as_tmp = torch.cuda.LongTensor(model.window_large).fill_(0)
                     data_as[k] = as_tmp
                     data_as_len[k] = model.window_large
-            label = Variable(label, requires_grad=False)
+            label = Variable(label, requires_grad=False).cuda()
             # print('label',label)
             q_a_state, q_a_score = model(data_q, data_as)  # initially modeling the question and all answers
-            q_a_score_np = q_a_score.data.cpu().numpy()[:,1]
-            predict = np.argmax(q_a_score.data.cpu().numpy(),axis=1)
-            # print('predict',predict)
+            # print('q_a',q_a_score)
+            q_a_score_np = q_a_score.data.cpu().numpy()
+            # predict = np.argmax(q_a_score.data.cpu().numpy(), axis=1)
 
-            if len(data_as)==1:
-                continue
-            for k in range(1,len(data_as)+1):
-                if k == 1:
-                    neg_a_index = np.argmin(
-                        q_a_score_np[1:])  # get the index of the most negative answer predicted in this step
-                    pos_a_index = np.argmax(q_a_score_np[1:])  # positive
-
-                    q_cur_state = model.cur_trans(q_a_state[0].view(1,q_a_state[0].size(0)))
-                    if predict[pos_a_index] == 0 or predict[neg_a_index] == 1:
-                        new_score = model.rl_soft_module.forward(q_cur_state)
-                    else:
-                        q_neg_state = model.neg_trans(q_a_state[neg_a_index].view(1,q_a_state[0].size(0)))
-                        q_pos_state = model.pos_trans(q_a_state[pos_a_index].view(1,q_a_state[0].size(0)))
-                        # cur_neg = model.cos(q_cur_state,q_neg_state)
-                        cur_neg = F.pairwise_distance(q_cur_state, q_neg_state, p=2, eps=1e-6)
-                        cur_pos = F.pairwise_distance(q_cur_state, q_pos_state, p=2, eps=1e-6)
-
-                        # cur_pos = model.cos(q_cur_state,q_pos_state)
-                        new_score = F.log_softmax(torch.cat([cur_neg, cur_pos], 1))
-                        # print(new_score)
-
+            rl_state = model.cur_trans(q_a_state[0].view(1, q_a_state[0].size(0)))
+            for k in range(2, len(data_as) + 1):
+                pos_a_index = np.argmax(q_a_score_np[0:k])  # positive
+                q_cur_state = q_a_state[k - 1].view(1, q_a_state[0].size(0))
+                if pos_a_index == k - 1:
+                    rl_state = torch.cat([rl_state, model.cur_trans(q_cur_state)], 0)
+                    # print('rl_state',rl_state.size())
                 else:
-                    q_cur_state = model.cur_trans(q_a_state[k-1].view(1,q_a_state[0].size(0)))
-                    neg_a_index = np.argmin(
-                        q_a_score_np[0:k])  # get the index of the most negative answer predicted in this step
-                    pos_a_index = np.argmax(q_a_score_np[0:k])  # positive
-                    if predict[pos_a_index] == 0 or predict[neg_a_index] == 1:
-                        soft_output = model.rl_soft_module.forward(q_cur_state)
-                        # print('aa',soft_output.size())
-                    else:
-                        q_neg_state = model.neg_trans(q_a_state[neg_a_index].view(1,q_a_state[0].size(0)))
-                        q_pos_state = model.pos_trans(q_a_state[pos_a_index].view(1,q_a_state[0].size(0)))
-                        # cur_neg = model.cos(q_cur_state,q_neg_state)
-                        # cur_pos = model.cos(q_cur_state,q_pos_state)
-                        cur_neg = F.pairwise_distance(q_cur_state, q_neg_state, p=2, eps=1e-6)
-                        cur_pos = F.pairwise_distance(q_cur_state, q_pos_state, p=2, eps=1e-6)
+                    q_pos_cat = torch.cat([data_q, data_as[pos_a_index]])
+                    current_answer = []
+                    current_answer.append(data_as[k - 1])
+                    q_pos_cur_state, _ = model.forward(q_pos_cat, current_answer)
+                    rl_state = torch.cat([rl_state, model.state_trans(q_pos_cur_state.view(1, q_a_state[0].size(0)))])
+            rl_state = model.relu(rl_state)
+            new_score = model.soft_module.forward(rl_state)
 
-                        # print('cur_neg,cur_pos',cur_neg, cur_pos)
-                        # soft_output = F.log_softmax(torch.cat([torch.unsqueeze(cur_neg,1),torch.unsqueeze(cur_pos,1)],1))
-                        soft_output = F.log_softmax(torch.cat([cur_neg, cur_pos], 1))
-                    # print(new_score.size())
-                    # print(soft_output.size())
-
-                    new_score = torch.cat([new_score,soft_output],0)
-
-            # print('new_score',new_score)
-            # print(q_a_score)
-            # print('soft',soft_output)
-
-            conf = new_score[:,1].data.cpu().numpy() # conf -> confidence -> 置信度'
+            conf = new_score.data.cpu().numpy() # conf -> confidence -> 置信度'
             rewards = np.full((len(conf)),1.)
             previous_map = 1.
+            # print('label',label)
+            # print('score',new_score)
 
             for k in range(1,len(conf)+1):
 
-                top_i_th_conf = new_score[:,1][:k].data
-                top_i_th_gt = label.data[:,1][:k]
+                top_i_th_conf = new_score[:k].data
+                top_i_th_gt = label.data[:k]
+                # print('top_i',type(top_i_th_conf))
+                # print('gt',type(top_i_th_gt))
 
                 cur_map = MAP(top_i_th_gt,top_i_th_conf)  # current MAP
                 # print('cur_map',k,cur_map)
@@ -741,7 +542,7 @@ def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
                 #     rewards[k-1][1] = cur_map-previous_map
                 #     rewards[k-1][0] = previous_map-cur_map
                 previous_map = cur_map
-            rewards = torch.FloatTensor(rewards)
+            rewards = torch.cuda.FloatTensor(rewards)
             # print('rewards',rewards)
             # rewards = -rewards
             example_loss = 0.
@@ -755,7 +556,11 @@ def train(model: compAggWikiqa,dataset: list,opt,current_epoch):
         loss = loss / batch_size
 
         if (i/opt.batch_size)%10 == 0:
-            print('train epoch %d, step %d, loss' % (current_epoch+1, i/opt.batch_size),loss.data.cpu().numpy())
+            print('train epoch %d, step %d, loss %f, lr %f'
+                   %(current_epoch+1,
+                     i/opt.batch_size,
+                     loss.data.cpu().numpy()[0],
+                     opt.lr*(opt.lr_decay**current_epoch)))
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
