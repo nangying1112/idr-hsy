@@ -23,7 +23,8 @@ class DMax(nn.Module):
             max_module = self.max_modules[i]
             if max_module is None:
                 if self.gpu:
-                    self.max_modules[i] = lambda x: torch.max(x, dim=self.dimension)[0].cuda()
+                    self.max_modules[i] = lambda x: torch.max(x, dim=self.dimension)[0]\
+                        # .cuda()
                 else:  # max will return two vecs, one for value, the other for index, and then (1,N) => N
                     self.max_modules[i] = lambda x: torch.max(x, dim=self.dimension)[0]
                 max_module = self.max_modules[i]

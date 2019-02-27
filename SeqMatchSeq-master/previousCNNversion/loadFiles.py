@@ -75,6 +75,7 @@ def buildVacab2Emb(opt):
     vocab = loadVocab(opt.task)
     ivocab = loadiVocab(opt.task)
 
+    pretrained_embed = opt.pretrained_embed
     emb = torch.randn(len(ivocab), opt.wvecDim) * 0.05
     if opt.task != 'snli':
         pass  # emb.zero()  TODO: not sure what it's doing
@@ -82,30 +83,32 @@ def buildVacab2Emb(opt):
     print("Loading " + opt.preEmb + " ...")
     if not os.path.exists("../data/" + opt.task + "/initEmb_py.t7"):
 
-        if opt.preEmb == 'glove':
-            if opt.wvecDim in [300]:  # TODO: support 50, 100, 200 as well
-                file = open("../data/" + opt.preEmb + "/glove.840B.%sd.txt" % opt.wvecDim, 'r')
+        if pretrained_embed == True:
+            if opt.preEmb == 'glove':
+                if opt.wvecDim in [300]:  # TODO: support 50, 100, 200 as well
+                    file = open("../data/" + opt.preEmb + "/glove.840B.%sd.txt" % opt.wvecDim, 'r')
+                else:
+                    raise Exception("Glove doesn't have %s dimension embeddings" % opt.wvecDim)
             else:
-                raise Exception("Glove doesn't have %s dimension embeddings" % opt.wvecDim)
-        else:
-            raise Exception("PreEmb not available: %s" % opt.preEmb)
+                raise Exception("PreEmb not available: %s" % opt.preEmb)
 
-        embRec = {}  # w_idx: 1
-        for line in file.readlines():
-            vals = line.rstrip("\n").split(' ')
-            word = vals.pop(0)
-            assert len(vals) == opt.wvecDim, pdb.set_trace()
+            embRec = {}  # w_idx: 1
+            for line in file.readlines():
+                vals = line.rstrip("\n").split(' ')
+                word = vals.pop(0)
+                assert len(vals) == opt.wvecDim, pdb.set_trace()
 
-            if word in vocab:
-                emb[vocab[word], :] = torch.cuda.FloatTensor([float(v) for v in vals])
+                if word in vocab:
+                    emb[vocab[word], :] = torch.FloatTensor([float(v) for v in vals])
 
-                embRec[vocab[word]] = 1
+                    embRec[vocab[word]] = 1
 
-        print("Number of words not appear in " + opt.preEmb + ": " + str(len(vocab) - len(embRec)))
-        if opt.task == 'snli':
-            pass  # TODO
-        torch.save(emb, "../data/" + opt.task + "/initEmb_py.t7")
-        torch.save(embRec, "../data/" + opt.task + "/unUpdateVocab_py.t7")
+            print("Number of words not appear in " + opt.preEmb + ": " + str(len(vocab) - len(embRec)))
+            if opt.task == 'snli':
+                pass  # TODO
+            torch.save(emb, "../data/" + opt.task + "/initEmb_py.t7")
+            torch.save(embRec, "../data/" + opt.task + "/unUpdateVocab_py.t7")
+
 
 
 def buildData(filename, task):
@@ -135,7 +138,7 @@ def buildData(filename, task):
                 # parse q_div, a_div and label
                 curr_q_words = [vocab[w] for w in q_div.split(' ')]
                 curr_a_words = [vocab[w] for w in a_div.split(' ')]
-                curr_label = float(label)
+                curr_label = int(label)
 
                 if curr_q_words == question:  # the candidates this line is same with previous
                     pass
@@ -147,6 +150,12 @@ def buildData(filename, task):
                         question_ = torch.LongTensor(question)
                         candidates_ = [torch.LongTensor(words) for words in candidates]
                         labels_ = torch.FloatTensor(np.array(labels) / np.sum(labels))
+                        # labels_ = torch.zeros([len(labels),2])
+                        # for i in range(len(labels)):
+                        #     labels_[i][labels[i]] = 1.
+                        # print(labels)
+                        # print(labels_)
+                        labels_ = labels_.type(torch.FloatTensor)
                         data.append((question_, candidates_, labels_))
 
                     # Start a fresh instance, candidates, labels
