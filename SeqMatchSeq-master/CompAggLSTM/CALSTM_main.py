@@ -19,14 +19,16 @@ parser.add_argument('--emb_lr', type=float, default=0., help='embedding learning
 parser.add_argument('--emb_partial', type=bool, default=True, help='only update the non-pretrained embeddings')
 parser.add_argument('--lr', type=float, default=4e-4, help='learning rate decay ratio')
 parser.add_argument('--lr_decay', type=float, default=0.95, help='learning rate decay ratio')
-parser.add_argument('--dropoutP', type=float, default=0.5, help='dropout ratio')
+parser.add_argument('--dropoutP', type=float, default=0.3, help='dropout ratio')
 parser.add_argument('--expIdx', type=int, default=0, help='experiment index')
 parser.add_argument('--num_classes', type=int, default=2, help='number of classes')
 
 parser.add_argument('--wvecDim', type=int, default=300, help='embedding dimension')
-parser.add_argument('--mem_dim', type=int, default=150, help='state dimension')
+# parser.add_argument('--mem_dim', type=int, default=150, help='state dimension')
 # parser.add_argument('--att_dim', type=int, default=150, help='attenion dimension') # The original author doesn't really use this argument
-parser.add_argument('--gru_dim', type=int, default=128, help='the dimension of GRU')
+parser.add_argument('--gru_encoder_dim', type=int, default=256, help='the dimension of GRU encoder')
+parser.add_argument('--gru_agg_dim', type=int, default=128, help='the dimension of GRU aggregator')
+
 parser.add_argument('--gru_layers', type=int, default=1, help='layers of GRU')
 
 parser.add_argument('--window_sizes', type=list, default=[1, 2, 3, 4, 5], help='window sizes')
@@ -44,8 +46,8 @@ parser.add_argument('--grad', type=str, default="adamax", help='gradient descent
 parser.add_argument('--log', type=str, default="nothing", help='log message')
 parser.add_argument('--gpu', type=bool, default=True, help='use gpu or not')
 parser.add_argument('--pretrained_embed', type=bool, default=True, help='use pretrained embedding or not')
-parser.add_argument('--pretrain_type', type=bool, default=False, help='rl_pretrain: true or supervised pretrain:false')
-parser.add_argument('--if_pretrain', type=bool, default=True, help='pretrain or not')
+parser.add_argument('--pretrain_type', type=bool, default=False, help='rl_pretrain: true or supervised train:false')
+parser.add_argument('--if_pretrain', type=bool, default=False, help='pretrain or not')
 
 
 
